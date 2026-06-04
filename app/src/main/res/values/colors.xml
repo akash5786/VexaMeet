@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="black">#FF000000</color>
+    <color name="white">#FFFFFFFF</color>
+    <color name="app_background">#0E1117</color>
+    <color name="panel_background">#171B24</color>
+    <color name="panel_stroke">#2A3140</color>
+    <color name="video_background">#090B10</color>
+    <color name="surface_overlay">#232B38</color>
+    <color name="text_primary">#F7F9FC</color>
+    <color name="text_secondary">#AEB7C5</color>
+    <color name="input_background">#10141C</color>
+    <color name="input_stroke">#343D4D</color>
+    <color name="action_call">#21A67A</color>
+    <color name="action_answer">#3676F6</color>
+    <color name="action_disconnect">#D94D4D</color>
+    <color name="action_neutral">#2B3445</color>
+    <color name="call_control_bg">#66212732</color>
+    <color name="call_control_pressed">#88404A5C</color>
+    <color name="danger_red">#EA4335</color>
+    <color name="brand_teal">#18D39E</color>
+    <color name="brand_blue">#1F7AFF</color>
+    <color name="splash_background">#071014</color>
+</resources>
