@@ -6,6 +6,11 @@ import android.graphics.SurfaceTexture
 import android.util.AttributeSet
 import android.view.TextureView
 import android.view.View
+import android.view.ViewGroup
+import android.graphics.Bitmap
+import android.graphics.Canvas
+import android.graphics.Paint
+import android.graphics.Rect
 import android.view.ViewOutlineProvider
 import org.webrtc.EglBase
 import org.webrtc.EglRenderer
@@ -52,6 +57,71 @@ class RoundedTextureViewRenderer @JvmOverloads constructor(
         }
     }
 
+    private var held = false
+    private var lastPreview: Bitmap? = null
+    private var lastPreviewTime = 0L
+    private var pauseView: View? = null
+    private var pauseParent: ViewGroup? = null
+    private val pauseLayoutListener = OnLayoutChangeListener { _, _, _, _, _, _, _, _, _ ->
+        pauseView?.layout(left, top, right, bottom)
+    }
+
+    fun setOnHold(paused: Boolean) {
+        if (held == paused) return
+        held = paused
+        if (paused) attachPauseView() else removePauseView()
+    }
+
+    private fun attachPauseView() {
+        if (!held || pauseView != null) return
+        val container = parent as? ViewGroup ?: return
+        val frozenPreview = lastPreview
+        val view = object : View(context) {
+            private val paint = Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG)
+            override fun onDraw(canvas: Canvas) {
+                // Enlarge the saved low-resolution frame for a soft blur. Never paint
+                // a black fallback: if no frame exists yet, leave the video visible.
+                frozenPreview?.let { canvas.drawBitmap(it, null, Rect(0, 0, width, height), paint) }
+                paint.color = android.graphics.Color.WHITE
+                paint.textAlign = Paint.Align.CENTER
+                paint.textSize = minOf(18f * resources.displayMetrics.scaledDensity, width / 8f)
+                paint.setShadowLayer(3f, 0f, 1f, android.graphics.Color.DKGRAY)
+                canvas.drawText(context.getString(com.vexa.meet.R.string.video_paused), width / 2f,
+                    height / 2f - (paint.ascent() + paint.descent()) / 2f, paint)
+                paint.clearShadowLayer()
+            }
+        }.apply {
+            contentDescription = context.getString(com.vexa.meet.R.string.video_paused)
+            importantForAccessibility = IMPORTANT_FOR_ACCESSIBILITY_YES
+            outlineProvider = this@RoundedTextureViewRenderer.outlineProvider
+            clipToOutline = true
+        }
+        pauseView = view
+        pauseParent = container
+        container.addView(view, container.indexOfChild(this) + 1, ViewGroup.LayoutParams(0, 0))
+        container.addOnLayoutChangeListener(pauseLayoutListener)
+        addOnLayoutChangeListener(pauseLayoutListener)
+        view.layout(left, top, right, bottom)
+    }
+
+    private fun removePauseView() {
+        pauseParent?.removeOnLayoutChangeListener(pauseLayoutListener)
+        removeOnLayoutChangeListener(pauseLayoutListener)
+        pauseView?.let { pauseParent?.removeView(it) }
+        pauseView = null
+        pauseParent = null
+    }
+
+    override fun onAttachedToWindow() {
+        super.onAttachedToWindow()
+        attachPauseView()
+    }
+
+    override fun onDetachedFromWindow() {
+        removePauseView()
+        super.onDetachedFromWindow()
+    }
+
     fun setMirror(mirror: Boolean) {
         renderer.setMirror(mirror)
     }
@@ -62,6 +132,8 @@ class RoundedTextureViewRenderer @JvmOverloads constructor(
     }
 
     fun release() {
+        setOnHold(false)
+        lastPreview = null
         renderer.release()
         drawer?.release()
         drawer = null
@@ -91,7 +163,14 @@ class RoundedTextureViewRenderer @JvmOverloads constructor(
         return true
     }
 
-    override fun onSurfaceTextureUpdated(surface: SurfaceTexture) = Unit
+    override fun onSurfaceTextureUpdated(surface: SurfaceTexture) {
+        val now = android.os.SystemClock.uptimeMillis()
+        if (held || width <= 0 || height <= 0 || now - lastPreviewTime < 250) return
+        lastPreviewTime = now
+        // Cache while video is live, before another app takes the camera.
+        runCatching { getBitmap(12, maxOf(1, (12f * height / width).toInt())) }
+            .getOrNull()?.let { lastPreview = it }
+    }
 
     private fun updateRendererAspectRatio(width: Int, height: Int) {
         if (!isInitialized || width <= 0 || height <= 0) return

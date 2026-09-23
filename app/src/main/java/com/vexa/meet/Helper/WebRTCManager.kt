@@ -62,6 +62,7 @@ class WebRTCManager(
         fun onRemoteVideoTrackReady(userId: String, track: VideoTrack) = Unit
         fun onRemoteVideoTrackRemoved(userId: String) = Unit
         fun onCallError(message: String) = Unit
+        fun onHoldChanged() = Unit
     }
 
     private data class PeerState(
@@ -114,6 +115,128 @@ class WebRTCManager(
     private var previousAudioMode = AudioManager.MODE_NORMAL
     private var previousSpeakerState = false
     private var audioFocusRequest: AudioFocusRequest? = null
+    private val interruptionHandler = Handler(Looper.getMainLooper())
+    private var focusInterrupted = false
+    private var phoneCallInterrupted = false
+    private val audioInterrupted: Boolean
+        get() = focusInterrupted || phoneCallInterrupted
+    private var cameraInterrupted = false
+    private var cameraRestartPending = false
+    private val focusListener = AudioManager.OnAudioFocusChangeListener { change ->
+        interruptionHandler.post {
+            if (!released && !disconnectRequested) {
+                focusInterrupted = change != AudioManager.AUDIOFOCUS_GAIN
+                updateAudioInterruption()
+            }
+        }
+    }
+    // MODE_IN_CALL identifies cellular calls independently of audio-focus delivery.
+    // Do not treat MODE_IN_COMMUNICATION as external: VexaMeet uses it itself.
+    private val phoneCallMonitor = object : Runnable {
+        override fun run() {
+            if (released || disconnectRequested) return
+            val inPhoneCall = audioManager.mode == AudioManager.MODE_IN_CALL
+            if (inPhoneCall != phoneCallInterrupted) {
+                phoneCallInterrupted = inPhoneCall
+                if (inPhoneCall) updateAudioInterruption() else onCallForegrounded()
+            }
+            interruptionHandler.postDelayed(this, 500)
+        }
+    }
+
+    private fun updateAudioInterruption() {
+        if (audioInterrupted) {
+            cameraRestartPending = true
+            cameraInterrupted = cameraEnabled
+            if (::videoCapturer.isInitialized) runCatching { videoCapturer.stopCapture() }
+        } else {
+            applyAudioRoute()
+            restartCamera()
+        }
+        publishHold()
+    }
+
+    private val cameraEvents = object : CameraVideoCapturer.CameraEventsHandler {
+        override fun onCameraError(errorDescription: String) = cameraFailed()
+        override fun onCameraDisconnected() = cameraFailed()
+        override fun onCameraFreezed(errorDescription: String) = cameraFailed()
+        override fun onCameraOpening(cameraName: String) = Unit
+        override fun onCameraClosed() = Unit
+        override fun onFirstFrameAvailable() {
+            interruptionHandler.post {
+                if (released || disconnectRequested || audioInterrupted) return@post
+                cameraInterrupted = false
+                cameraRestartPending = false
+                interruptionHandler.removeCallbacks(cameraRetry)
+                publishHold()
+            }
+        }
+    }
+    private val cameraRetry = Runnable { restartCamera() }
+
+    private fun cameraFailed() {
+        interruptionHandler.post {
+            if (released || disconnectRequested) return@post
+            cameraInterrupted = cameraEnabled
+            cameraRestartPending = true
+            publishHold()
+            interruptionHandler.removeCallbacks(cameraRetry)
+            interruptionHandler.postDelayed(cameraRetry, 2000)
+        }
+    }
+
+    private fun restartCamera() {
+        if (released || disconnectRequested || audioInterrupted || !cameraEnabled ||
+            !cameraRestartPending || !::videoCapturer.isInitialized) return
+        runCatching {
+            videoCapturer.stopCapture()
+            videoCapturer.startCapture(1280, 720, 30)
+        }.onFailure { Log.w("WebRTC", "Camera recovery failed", it) }
+        interruptionHandler.removeCallbacks(cameraRetry)
+        interruptionHandler.postDelayed(cameraRetry, 3000)
+    }
+
+    fun onCallForegrounded() {
+        if (released || disconnectRequested) return
+        // Returning to this screen must not resume media over an ongoing phone call.
+        phoneCallInterrupted = audioManager.mode == AudioManager.MODE_IN_CALL
+        if (phoneCallInterrupted) {
+            updateAudioInterruption()
+            return
+        }
+        if (focusInterrupted) {
+            val result = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                audioFocusRequest?.let { audioManager.requestAudioFocus(it) }
+            } else {
+                @Suppress("DEPRECATION")
+                audioManager.requestAudioFocus(focusListener, AudioManager.STREAM_VOICE_CALL, AudioManager.AUDIOFOCUS_GAIN_TRANSIENT)
+            }
+            if (result == AudioManager.AUDIOFOCUS_REQUEST_GRANTED) {
+                focusInterrupted = false
+                applyAudioRoute()
+            }
+        }
+        restartCamera()
+        publishHold()
+    }
+
+    fun isParticipantOnHold(userId: String): Boolean =
+        if (userId == participantId) audioInterrupted || cameraInterrupted
+        else participants[userId]?.onHold == true
+
+    private fun publishHold() {
+        if (released || disconnectRequested) return
+        val held = audioInterrupted || cameraInterrupted
+        audioTrack?.setEnabled(micEnabled && !held)
+        localVideoTrack?.setEnabled(cameraEnabled && !held)
+        if (localParticipantUpserted) {
+            firestore.collection("calls").document(roomId).collection("participants")
+                .document(participantId).update("onHold", held)
+                .addOnFailureListener { Log.w("WebRTC", "Unable to publish hold state", it) }
+        }
+        listener?.onHoldChanged()
+    }
+
     private val audioRouteHandler = Handler(Looper.getMainLooper())
 
     private val audioDeviceCallback = object : AudioDeviceCallback() {
@@ -139,6 +262,7 @@ class WebRTCManager(
         initializePeerConnectionFactory()
         initializeSurfaceViews()
         startLocalMedia()
+        interruptionHandler.post(phoneCallMonitor)
         if (isCaller) {
             createRoomDocument()
         }
@@ -154,14 +278,16 @@ class WebRTCManager(
 
     fun setMicEnabled(enabled: Boolean): Boolean {
         micEnabled = enabled
-        audioTrack?.setEnabled(enabled)
+        audioTrack?.setEnabled(enabled && !audioInterrupted && !cameraInterrupted)
         audioManager.isMicrophoneMute = !enabled
         return micEnabled
     }
 
     fun setCameraEnabled(enabled: Boolean): Boolean {
         cameraEnabled = enabled
-        localVideoTrack?.setEnabled(enabled)
+        localVideoTrack?.setEnabled(enabled && !audioInterrupted && !cameraInterrupted)
+        if (enabled) restartCamera() else cameraInterrupted = false
+        publishHold()
         return cameraEnabled
     }
 
@@ -242,12 +368,12 @@ class WebRTCManager(
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             audioFocusRequest = AudioFocusRequest.Builder(AudioManager.AUDIOFOCUS_GAIN_TRANSIENT_EXCLUSIVE)
                 .setAudioAttributes(attributes)
-                .setOnAudioFocusChangeListener { }
+                .setOnAudioFocusChangeListener(focusListener, interruptionHandler)
                 .build()
             audioManager.requestAudioFocus(audioFocusRequest!!)
         } else {
             @Suppress("DEPRECATION")
-            audioManager.requestAudioFocus(null, AudioManager.STREAM_VOICE_CALL, AudioManager.AUDIOFOCUS_GAIN_TRANSIENT)
+            audioManager.requestAudioFocus(focusListener, AudioManager.STREAM_VOICE_CALL, AudioManager.AUDIOFOCUS_GAIN_TRANSIENT)
         }
 
         audioManager.mode = AudioManager.MODE_IN_COMMUNICATION
@@ -257,6 +383,8 @@ class WebRTCManager(
     }
 
     private fun applyAudioRoute(forceSpeaker: Boolean = speakerEnabled) {
+        if (released || disconnectRequested || audioInterrupted ||
+            audioManager.mode == AudioManager.MODE_IN_CALL) return
         audioManager.mode = AudioManager.MODE_IN_COMMUNICATION
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
@@ -431,7 +559,7 @@ class WebRTCManager(
         val status = document.getString("status") ?: "joined"
         val role = document.getString("role")
         val active = document.getBoolean("active") ?: status !in setOf("ended", "left")
-        return CallParticipant(userId = userId, status = status, role = role, active = active)
+        return CallParticipant(userId = userId, status = status, role = role, active = active, onHold = document.getBoolean("onHold") ?: false)
     }
 
     private fun syncParticipants() {
@@ -774,6 +902,7 @@ class WebRTCManager(
 
         audioSource = peerConnectionFactory.createAudioSource(MediaConstraints())
         audioTrack = peerConnectionFactory.createAudioTrack("AUDIO_TRACK", audioSource)
+        publishHold()
 
         peerStates.values.forEach { state -> addLocalTracks(state.connection) }
     }
@@ -813,18 +942,19 @@ class WebRTCManager(
     private fun createCapturer(enumerator: Camera2Enumerator, frontFacing: Boolean): VideoCapturer? {
         return enumerator.deviceNames.firstOrNull {
             if (frontFacing) enumerator.isFrontFacing(it) else enumerator.isBackFacing(it)
-        }?.let { enumerator.createCapturer(it, null) }
+        }?.let { enumerator.createCapturer(it, cameraEvents) }
     }
 
     private fun createCapturer(enumerator: Camera1Enumerator, frontFacing: Boolean): VideoCapturer? {
         return enumerator.deviceNames.firstOrNull {
             if (frontFacing) enumerator.isFrontFacing(it) else enumerator.isBackFacing(it)
-        }?.let { enumerator.createCapturer(it, null) }
+        }?.let { enumerator.createCapturer(it, cameraEvents) }
     }
 
     fun disconnect(cleanupRoom: Boolean = true) {
         try {
             disconnectRequested = true
+            interruptionHandler.removeCallbacksAndMessages(null)
             localParticipantLeaving = true
             audioRouteHandler.removeCallbacksAndMessages(null)
             roomRegistration?.remove()
@@ -854,6 +984,7 @@ class WebRTCManager(
     }
 
     fun release() {
+        interruptionHandler.removeCallbacksAndMessages(null)
         if (released) return
         released = true
         if (ActiveCallSession.manager === this) {
@@ -862,6 +993,7 @@ class WebRTCManager(
         }
         try {
             disconnectRequested = true
+            interruptionHandler.removeCallbacksAndMessages(null)
             roomRegistration?.remove()
             participantsRegistration?.remove()
             roomRegistration = null
@@ -1021,6 +1153,7 @@ class WebRTCManager(
                     "userId" to participantId,
                     "status" to participantStatus,
                     "active" to true,
+                    "onHold" to (audioInterrupted || cameraInterrupted),
                     "role" to if (isCaller) "host" else "participant",
                     "joinedAt" to FieldValue.serverTimestamp(),
                     "updatedAt" to FieldValue.serverTimestamp()
@@ -1218,7 +1351,7 @@ class WebRTCManager(
             audioFocusRequest?.let { audioManager.abandonAudioFocusRequest(it) }
         } else {
             @Suppress("DEPRECATION")
-            audioManager.abandonAudioFocus(null)
+            audioManager.abandonAudioFocus(focusListener)
         }
     }
 

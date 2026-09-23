@@ -15,8 +15,8 @@ android {
         applicationId = "com.vexa.meet"
         minSdk = 24
         targetSdk = 36
-        versionCode = 5
-        versionName = "1.5"
+        versionCode = 6
+        versionName = "1.6"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
@@ -61,6 +61,7 @@ dependencies {
     implementation("androidx.core:core-splashscreen:1.0.1")
     testImplementation(libs.junit)
     androidTestImplementation(libs.androidx.junit)
+    androidTestImplementation("androidx.test:rules:1.7.0")
     androidTestImplementation(libs.androidx.espresso.core)
     implementation("io.getstream:stream-webrtc-android:1.3.10")
     //implementation("io.github.webrtc-sdk:android:144.7559.05")

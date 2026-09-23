@@ -190,6 +190,7 @@ class MeetingActivity : AppCompatActivity(), WebRTCManager.Listener, ActiveCallA
             if ((pendingInviteRoomId != null || pendingStartMeeting) && !permissionRequestInFlight) checkPermissions()
         }
         if (isInCall && !isInPictureInPictureModeCompat()) {
+            webRTCManager?.onCallForegrounded()
             webRTCManager?.reattachRenderers(binding.localView, binding.remoteView)
             setControlsVisible(true)
             enterImmersiveMode()
@@ -764,12 +765,27 @@ class MeetingActivity : AppCompatActivity(), WebRTCManager.Listener, ActiveCallA
         binding.tvRoomStatus.text = status
     }
 
+    private fun blockStartDuringAnotherCall(): Boolean {
+        val audioManager = getSystemService(Context.AUDIO_SERVICE) as AudioManager
+        val anotherCall = ActiveCallSession.isActive || audioManager.mode in setOf(
+            AudioManager.MODE_IN_CALL,
+            AudioManager.MODE_IN_COMMUNICATION
+        )
+        if (!anotherCall) return false
+        cancelPendingJoin()
+        val message = getString(R.string.already_in_another_call)
+        entryError = message
+        Toast.makeText(this, message, Toast.LENGTH_LONG).show()
+        return true
+    }
+
     private fun startCall(isCaller: Boolean) {
         if (isInCall) return
         if (ActiveCallSession.isActive && ActiveCallSession.roomId == currentRoomId) {
             restoreActiveCallIfNeeded()
             return
         }
+        if (blockStartDuringAnotherCall()) return
         if (!isCaller) {
             val attempt = ++joinAttempt
             entryBusy = true
@@ -792,6 +808,8 @@ class MeetingActivity : AppCompatActivity(), WebRTCManager.Listener, ActiveCallA
     }
 
     private fun startCallInternal(isCaller: Boolean) {
+        // Room validation is asynchronous; another call may have started while it ran.
+        if (blockStartDuringAnotherCall()) return
         if (updateRequired || updateCheckInFlight) {
             pendingStartMeeting = isCaller
             if (!isCaller) pendingInviteRoomId = currentRoomId
@@ -1241,6 +1259,7 @@ class MeetingActivity : AppCompatActivity(), WebRTCManager.Listener, ActiveCallA
                 // A participant can leave while the tap animation is running.
                 if (canSwapVideos() && webRTCManager === manager) {
                     isLocalVideoFullScreen = manager.swapVideoSurfaces()
+                    updateHoldVideo()
                 }
                 updateCameraDisabledUi()
                 binding.localPreviewContainer.animate()
@@ -1279,6 +1298,22 @@ class MeetingActivity : AppCompatActivity(), WebRTCManager.Listener, ActiveCallA
         }
 
         updateParticipants(count = activeParticipants.size)
+        updateHoldVideo()
+    }
+
+    override fun onHoldChanged() {
+        runOnUiThread { updateHoldVideo() }
+    }
+
+    private fun updateHoldVideo() {
+        val manager = webRTCManager ?: return
+        val localHeld = manager.isParticipantOnHold(senderId())
+        val remoteId = getActiveParticipants().map { it.userId }.filter { it != senderId() }.sorted().firstOrNull()
+        val remoteHeld = remoteId?.let { manager.isParticipantOnHold(it) } == true
+        binding.remoteView.setOnHold(if (isLocalVideoFullScreen) localHeld else remoteHeld)
+        binding.localView.setOnHold(if (isLocalVideoFullScreen) remoteHeld else localHeld)
+        groupLocalRenderer?.setOnHold(localHeld)
+        remoteVideoViews.forEach { (id, view) -> view.setOnHold(manager.isParticipantOnHold(id)) }
     }
 
     private fun renderStandardLayout(activeRemoteIds: List<String>) {
@@ -1722,8 +1757,11 @@ class MeetingActivity : AppCompatActivity(), WebRTCManager.Listener, ActiveCallA
 
     override fun onParticipantsChanged(participants: List<CallParticipant>) {
         runOnUiThread {
+            val sameParticipants = currentParticipantsSnapshot.map { it.userId }.toSet() ==
+                participants.map { it.userId }.toSet()
             currentParticipantsSnapshot = participants
-            renderCallLayout()
+            // Keep existing frames when only a participant's hold state changes.
+            if (sameParticipants) updateHoldVideo() else renderCallLayout()
         }
     }
 

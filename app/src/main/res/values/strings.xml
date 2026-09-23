@@ -18,4 +18,6 @@
     <string name="meeting_or">OR</string>
     <string name="room_id_required">Enter a room ID to join the meeting.</string>
     <string name="room_id_invalid">Use 3–64 letters, numbers, underscores or hyphens.</string>
+    <string name="already_in_another_call">You are already in another call. End it before starting a video call.</string>
+    <string name="video_paused">Video Paused</string>
 </resources>
