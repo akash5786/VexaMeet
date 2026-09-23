@@ -7,6 +7,7 @@ import android.app.PendingIntent
 import android.app.Service
 import android.content.Context
 import android.content.Intent
+import android.net.Uri
 import android.os.Build
 import android.os.Handler
 import android.os.IBinder
@@ -14,6 +15,7 @@ import android.os.Looper
 import androidx.core.app.NotificationCompat
 import androidx.core.content.ContextCompat
 import java.util.Locale
+import java.util.UUID
 
 class CallForegroundService : Service() {
 
@@ -21,9 +23,17 @@ class CallForegroundService : Service() {
     private var callerName = "Active call"
     private var startedAtMillis = 0L
     private var muted = false
+    private var callRequestId: String? = null
+    private var foregroundStarted = false
+    private var lastStartId = 0
 
     private val durationRunnable = object : Runnable {
         override fun run() {
+            if (!hasCurrentCall()) {
+                stopNotification()
+                stopSelf(lastStartId)
+                return
+            }
             updateNotification()
             handler.postDelayed(this, 1000)
         }
@@ -35,22 +45,45 @@ class CallForegroundService : Service() {
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        lastStartId = startId
+        val requestId = intent?.getStringExtra(EXTRA_CALL_REQUEST_ID)
+        if (requestId == null || requestId != requestedCallId || !ActiveCallSession.isActive) {
+            // Old starts/actions must neither revive an ended call nor stop a newer one.
+            if (!hasCurrentCall()) {
+                stopNotification()
+                stopSelf(startId)
+            }
+            return START_NOT_STICKY
+        }
         when (intent?.action) {
             ACTION_START -> {
-                callerName = intent.getStringExtra(EXTRA_CALLER_NAME) ?: callerName
+                val roomId = intent.getStringExtra(EXTRA_CALLER_NAME)
+                if (roomId != ActiveCallSession.roomId) {
+                    if (!hasCurrentCall()) {
+                        stopNotification()
+                        stopSelf(startId)
+                    }
+                    return START_NOT_STICKY
+                }
+                if (callRequestId != requestId) startedAtMillis = 0L
+                callRequestId = requestId
+                callerName = roomId
                 muted = intent.getBooleanExtra(EXTRA_MUTED, muted)
                 if (startedAtMillis == 0L) {
                     startedAtMillis = System.currentTimeMillis()
                 }
                 startForeground(NOTIFICATION_ID, buildNotification())
+                foregroundStarted = true
                 handler.removeCallbacks(durationRunnable)
                 handler.post(durationRunnable)
             }
             ACTION_SET_MUTED -> {
+                if (!hasCurrentCall()) return stopInactiveService(startId)
                 muted = intent.getBooleanExtra(EXTRA_MUTED, muted)
                 updateNotification()
             }
             ACTION_TOGGLE_MUTE -> {
+                if (!hasCurrentCall()) return stopInactiveService(startId)
                 muted = !muted
                 val listener = ActiveCallActions.listener
                 if (listener != null) {
@@ -61,39 +94,66 @@ class CallForegroundService : Service() {
                 updateNotification()
             }
             ACTION_END_CALL -> {
-                val listener = ActiveCallActions.listener
-                if (listener != null) {
-                    listener.onNotificationEndCall()
-                } else {
-                    ActiveCallSession.endActiveCall()
+                if (!hasCurrentCall()) return stopInactiveService(startId)
+                // Remove the notification before potentially slow camera teardown.
+                requestedCallId = null
+                stopNotification()
+                try {
+                    val listener = ActiveCallActions.listener
+                    if (listener != null) {
+                        listener.onNotificationEndCall()
+                    } else {
+                        ActiveCallSession.endActiveCall()
+                    }
+                } finally {
+                    stopSelf(startId)
                 }
-                stopSelf()
             }
-            ACTION_STOP -> stopSelf()
+            ACTION_STOP -> {
+                requestedCallId = null
+                stopNotification()
+                stopSelf(startId)
+            }
+            else -> if (!hasCurrentCall()) return stopInactiveService(startId)
         }
-        return START_STICKY
+        // WebRTC lives in this process; a restarted service cannot restore its call.
+        return START_NOT_STICKY
     }
 
     override fun onDestroy() {
-        handler.removeCallbacks(durationRunnable)
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
-            stopForeground(STOP_FOREGROUND_REMOVE)
-        } else {
-            @Suppress("DEPRECATION")
-            stopForeground(true)
-        }
+        stopNotification()
         super.onDestroy()
+    }
+
+    private fun stopNotification() {
+        foregroundStarted = false
+        handler.removeCallbacks(durationRunnable)
+        stopForeground(STOP_FOREGROUND_REMOVE)
+        getSystemService(NotificationManager::class.java).cancel(NOTIFICATION_ID)
+        startedAtMillis = 0L
+    }
+
+    private fun stopInactiveService(startId: Int): Int {
+        stopNotification()
+        stopSelf(startId)
+        return START_NOT_STICKY
+    }
+
+    private fun hasCurrentCall(): Boolean {
+        return foregroundStarted && callRequestId != null && callRequestId == requestedCallId &&
+            ActiveCallSession.isActive && ActiveCallSession.roomId == callerName
     }
 
     override fun onBind(intent: Intent?): IBinder? = null
 
     private fun updateNotification() {
+        if (!hasCurrentCall()) return
         val manager = getSystemService(NotificationManager::class.java)
         manager.notify(NOTIFICATION_ID, buildNotification())
     }
 
     private fun buildNotification(): Notification {
-        val openIntent = Intent(this, MainActivity::class.java).apply {
+        val openIntent = Intent(this, MeetingActivity::class.java).apply {
             flags = Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP
         }
         val openPendingIntent = PendingIntent.getActivity(
@@ -126,7 +186,14 @@ class CallForegroundService : Service() {
     }
 
     private fun servicePendingIntent(action: String, requestCode: Int): PendingIntent {
-        val intent = Intent(this, CallForegroundService::class.java).setAction(action)
+        val intent = Intent(this, CallForegroundService::class.java).apply {
+            this.action = action
+            putExtra(EXTRA_CALL_REQUEST_ID, callRequestId)
+            // Give each call distinct action identities, so an old action cannot
+            // acquire a newer call's extras through FLAG_UPDATE_CURRENT.
+            data = Uri.Builder().scheme("vexameet-notification").authority("call")
+                .appendPath(callRequestId).appendPath(action).build()
+        }
         return PendingIntent.getService(
             this,
             requestCode,
@@ -164,24 +231,40 @@ class CallForegroundService : Service() {
         private const val ACTION_END_CALL = "com.vexa.meet.action.END_CALL"
         private const val EXTRA_CALLER_NAME = "extra_caller_name"
         private const val EXTRA_MUTED = "extra_muted"
+        private const val EXTRA_CALL_REQUEST_ID = "extra_call_request_id"
+
+        @Volatile private var requestedCallId: String? = null
+        private var requestedRoomId: String? = null
 
         fun start(context: Context, callerName: String, muted: Boolean) {
+            if (requestedCallId == null || requestedRoomId != callerName) {
+                requestedCallId = UUID.randomUUID().toString()
+            }
+            requestedRoomId = callerName
             val intent = Intent(context, CallForegroundService::class.java).apply {
                 action = ACTION_START
                 putExtra(EXTRA_CALLER_NAME, callerName)
                 putExtra(EXTRA_MUTED, muted)
+                putExtra(EXTRA_CALL_REQUEST_ID, requestedCallId)
             }
             ContextCompat.startForegroundService(context, intent)
         }
 
         fun stop(context: Context) {
+            // Invalidate queued timer ticks and mute/start intents immediately.
+            requestedCallId = null
+            requestedRoomId = null
             context.stopService(Intent(context, CallForegroundService::class.java))
+            context.getSystemService(NotificationManager::class.java).cancel(NOTIFICATION_ID)
         }
 
         fun setMuted(context: Context, muted: Boolean) {
+            val requestId = requestedCallId ?: return
+            if (!ActiveCallSession.isActive) return
             val intent = Intent(context, CallForegroundService::class.java).apply {
                 action = ACTION_SET_MUTED
                 putExtra(EXTRA_MUTED, muted)
+                putExtra(EXTRA_CALL_REQUEST_ID, requestId)
             }
             context.startService(intent)
         }

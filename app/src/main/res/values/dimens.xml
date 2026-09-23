@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <dimen name="local_preview_width">110dp</dimen>
+    <dimen name="local_preview_height">160dp</dimen>
+    <dimen name="local_preview_large_width">172dp</dimen>
+    <dimen name="local_preview_large_height">250dp</dimen>
+</resources>

@@ -1,3 +1,21 @@
 <resources>
     <string name="app_name">VexaMeet</string>
+    <string name="invite_people_copy_room_id">Invite people: share meeting</string>
+    <string name="meeting_tagline">Secure. Simple. Together.</string>
+    <string name="meeting_welcome_title">Start or Join a Meeting</string>
+    <string name="meeting_welcome_description">Connect instantly with your team,\nfriends or clients.</string>
+    <string name="start_meeting">Start a Meeting</string>
+    <string name="have_room_id">I already have a room ID</string>
+    <string name="meeting_footer">Simple meetings for a more connected world</string>
+    <string name="meeting_back">Back</string>
+    <string name="join_meeting_title">Join a Meeting</string>
+    <string name="join_meeting">Join Meeting</string>
+    <string name="start_new_meeting">Start a New Meeting</string>
+    <string name="room_id_label">Room ID</string>
+    <string name="room_id_hint">Enter room ID</string>
+    <string name="room_id_help_title">Where to find the room ID?</string>
+    <string name="room_id_help_body">The room ID is shared by the meeting host. Enter the ID above to join the meeting.</string>
+    <string name="meeting_or">OR</string>
+    <string name="room_id_required">Enter a room ID to join the meeting.</string>
+    <string name="room_id_invalid">Use 3–64 letters, numbers, underscores or hyphens.</string>
 </resources>

@@ -21,18 +21,13 @@
         android:supportsRtl="true"
         android:theme="@style/Theme.VexaMeet.Starting">
         <activity
-            android:name=".MainActivity"
+            android:name=".MeetingActivity"
             android:configChanges="screenSize|smallestScreenSize|screenLayout|orientation|keyboardHidden"
             android:exported="true"
             android:launchMode="singleTop"
             android:resizeableActivity="true"
             android:windowSoftInputMode="adjustResize"
             android:supportsPictureInPicture="true">
-            <intent-filter>
-                <action android:name="android.intent.action.MAIN" />
-
-                <category android:name="android.intent.category.LAUNCHER" />
-            </intent-filter>
             <intent-filter>
                 <action android:name="android.intent.action.VIEW" />
 
@@ -44,6 +39,16 @@
                     android:scheme="vexameet" />
             </intent-filter>
         </activity>
+        <!-- Preserve the launcher component used by existing installs and pinned shortcuts. -->
+        <activity-alias
+            android:name=".MainActivity"
+            android:targetActivity=".MeetingActivity"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity-alias>
         <service
             android:name=".CallForegroundService"
             android:exported="false"

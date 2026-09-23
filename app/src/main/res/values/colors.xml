@@ -20,5 +20,6 @@
     <color name="danger_red">#EA4335</color>
     <color name="brand_teal">#18D39E</color>
     <color name="brand_blue">#1F7AFF</color>
+    <color name="brand_wordmark_blue">#639FFF</color>
     <color name="splash_background">#071014</color>
 </resources>

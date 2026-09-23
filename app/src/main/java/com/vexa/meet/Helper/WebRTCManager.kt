@@ -17,6 +17,8 @@ import com.google.firebase.firestore.FirebaseFirestore
 import com.google.firebase.firestore.ListenerRegistration
 import com.google.firebase.firestore.SetOptions
 import com.vexa.meet.CallParticipant
+import com.vexa.meet.ActiveCallSession
+import com.vexa.meet.CallForegroundService
 import com.vexa.meet.ui.RoundedTextureViewRenderer
 import org.webrtc.AudioSource
 import org.webrtc.AudioTrack
@@ -854,6 +856,10 @@ class WebRTCManager(
     fun release() {
         if (released) return
         released = true
+        if (ActiveCallSession.manager === this) {
+            ActiveCallSession.clear()
+            CallForegroundService.stop(context)
+        }
         try {
             disconnectRequested = true
             roomRegistration?.remove()
@@ -1120,14 +1126,20 @@ class WebRTCManager(
     private fun handleRoomEnded(reason: String) {
         if (roomEnded) return
         roomEnded = true
-        listener?.onConnectionLabelChanged("Disconnected", false)
-        listener?.onCallError(reason)
-        listener?.onCallDisconnected()
-        peerStates.keys.toList().forEach { removePeerConnection(it, dueToRemoteLeave = true) }
-        participantsRegistration?.remove()
-        roomRegistration?.remove()
-        participantsRegistration = null
-        roomRegistration = null
+        try {
+            listener?.onConnectionLabelChanged("Disconnected", false)
+            listener?.onCallError(reason)
+            listener?.onCallDisconnected()
+            peerStates.keys.toList().forEach { removePeerConnection(it, dueToRemoteLeave = true) }
+            participantsRegistration?.remove()
+            roomRegistration?.remove()
+            participantsRegistration = null
+            roomRegistration = null
+        } finally {
+            // The call can end while its Activity is gone. Release the session and
+            // notification even when there is no UI listener to run endCall().
+            if (ActiveCallSession.manager === this) release()
+        }
     }
 
     private fun cleanupRoomData() {
